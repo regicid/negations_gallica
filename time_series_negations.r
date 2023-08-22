@@ -13,6 +13,7 @@ library(gridExtra)
 library(DHARMa)
 library(tidyr)
 library(zoo)
+library(plotly)
 
 # Custom path
 path_projet = "C:\\Users\\Dell\\Documents\\Projet Benoit\\data"
@@ -49,19 +50,11 @@ compute_mean_without_outliers <- function(temp, probs, weights = 1) {
     if (weights == 'time_lin') { # For a weighted rolling mean. Carefull, it only works with centered rolling windows
       window_size = length(temp)
       middle = as.integer(window_size/2)
-      if (middle == window_size/2) {pad = NULL} else{pad = middle}
+      if (middle == window_size/2) {pad = NULL} else{pad = 0}
       weights = c(c(1:middle), 
                   c(pad), 
                   c(middle:1))
       weights = weights+1
-    } else if (weights == 'time_log') { # Same but with a log measure
-      window_size = length(temp)
-      middle = as.integer(window_size/2)
-      if (middle == window_size/2) {pad = NULL} else{pad = middle}
-      weights = c(c(1:middle), 
-                  c(pad), 
-                  c(middle:1))
-      weights = log(weights+1)
     }
   }
   q <- quantile(na.omit(temp), probs = probs/2) 
@@ -74,6 +67,34 @@ compute_mean_without_outliers <- function(temp, probs, weights = 1) {
                                          w = weights, 
                                          na.rm = TRUE)
   return(mean_without_outliers)
+}
+# Rolling weighted std without outliers
+compute_var_without_outliers <- function(temp, probs, weights = 1) {
+  if (weights == 1) {
+    weights = rep(1, length(temp))
+  } else {
+    if (weights == 'time_lin') { # For a weighted rolling mean. Carefull, it only works with centered rolling windows
+      window_size = length(temp)
+      middle = as.integer(window_size/2)
+      if (middle == window_size/2) {pad = NULL} else{pad = 0}
+      weights = c(c(1:middle), 
+                  c(pad), 
+                  c(middle:1))
+      weights = weights+1
+    }
+  }
+  q <- quantile(na.omit(temp), probs = probs/2) 
+  BOOL1 = temp >= q
+  q <- quantile(na.omit(temp), probs = 1-(probs/2))  
+  BOOL2 = temp <= q
+  temp <- temp[BOOL1 & BOOL2]
+  weights <- weights[BOOL1 & BOOL2]
+  weights_square <- weights**2
+  sd_without_outliers <- weighted.mean(x = temp, 
+                                       w = weights_square, 
+                                       na.rm = TRUE) * sum(weights_square)
+  sd_without_outliers = sd_without_outliers / sum(weights)**2
+  return(sd_without_outliers)
 }
 
 # Gallicagram data import
@@ -120,22 +141,26 @@ reg_data = gallicagram_data %>%
   mutate(year = year(date)) %>% 
   select(journal, ratio, n, total, year) %>% 
   na.omit() %>% 
-  mutate(total_bin_100 = exp(round(log(total)*100)/100))
+  mutate(total_bin_100 = exp(round(log(total*100)/100)))
 reg_data_total_bin = reg_data %>%
   group_by(total_bin_100, journal, year) %>%
   filter(ratio <= quantile(ratio, 0.99),
          ratio >= quantile(ratio, 0.01)) %>%
-  slice_sample(n = 30) %>% 
+  # slice_sample(n = 30) %>% 
   summarise(var_ratio = var(ratio, na.rm = TRUE),
             ratio = mean(ratio, na.rm = TRUE),
             total = mean(total, na.rm = TRUE),
             group_size = n()) %>%
-  ungroup() %>% filter(group_size >= 30)
+  ungroup() %>% 
+  filter(group_size >= 30,
+         journal != 'moniteur', # These newspapers have too much annual fluctuations
+         journal != 'presse')
+
 # We validate empirically our model using a train / test split
 train_ind <- sample(seq_len(nrow(reg_data_total_bin)), size = as.integer(nrow(reg_data_total_bin)*0.75))
 # reg_data_total_bin_train = reg_data_total_bin[train_ind,]
 # reg_data_total_bin_test = reg_data_total_bin[-train_ind,]
-reg_data_total_bin_train = reg_data_total_bin %>% filter(journal == 'petit_parisien')
+reg_data_total_bin_train = reg_data_total_bin %>% filter(journal != 'figaro')
 reg_data_total_bin_test = reg_data_total_bin%>% filter(journal == 'figaro')
 
 custom_var_computer <- function(ratio, total, b_hat_T, b_hat_R, ess, conf_int = 0.5) {
@@ -167,43 +192,44 @@ summary(reg)
 b_hat_T = coef(reg)['I(1/log(total))']
 b_hat_R = coef(reg)['ratio']
 conf_int = 0.5
-# b_hat_T_975 = confint(reg, level = 0.90)['I(1/log(total))', '95 %']
-# b_hat_R_025 = confint(reg, level = 0.90)['ratio', '5 %']
+# b_hat_T = confint(reg, level = 0.90)['I(1/log(total))', '95 %']
+# b_hat_R = confint(reg, level = 0.90)['ratio', '5 %']
 # conf_int = 0.9
 reg_data_total_bin_test = reg_data_total_bin_test %>% 
-  mutate(var_pred = custom_var_computer(ratio = ratio,
+  mutate(var_math = custom_var_computer(ratio = ratio,
                                         total = total,
                                         b_hat_T = b_hat_T,
                                         b_hat_R = b_hat_R,
                                         ess = ess,
                                         conf_int = conf_int)) %>% 
-  mutate(erreur_pred = (var_ratio - var_pred) / var_ratio)
-plot(reg_data_total_bin_test$var_ratio, reg_data_total_bin_test$var_pred)
+  mutate(erreur_pred = (var_ratio - var_math) / var_ratio)
+plot(reg_data_total_bin_test$var_ratio, reg_data_total_bin_test$var_math)
 abline(a = 0, b = 1, col = 'red')
 plot(density(reg_data_total_bin_test$erreur_pred, na.rm = TRUE))
 abline(v = mean(reg_data_total_bin_test$erreur_pred, na.rm = TRUE), col = 'red')
-reg <- lm(var_ratio ~ 0 + var_pred, data = reg_data_total_bin_test)
+reg <- lm(var_ratio ~ 0 + var_math, data = reg_data_total_bin_test)
 summary(reg)
 # We compare with a classical linear regression model estimation
-reg <- lm(var_ratio ~ total,
+reg <- lm(log(var_ratio) ~ log(total) + log(ratio),
           data = reg_data_total_bin_train)
 summary(reg)
 reg_data_total_bin_test = reg_data_total_bin_test %>% 
-  mutate(var_pred2 = exp(predict(reg, reg_data_total_bin_test))) %>% 
-  mutate(erreur_pred2 = (var_ratio - var_pred2) / var_ratio)
-plot(reg_data_total_bin_test$var_ratio, reg_data_total_bin_test$var_pred2)
+  mutate(var_math2 = exp(predict(reg, reg_data_total_bin_test))) %>% 
+  mutate(erreur_pred2 = (var_ratio - var_math2) / var_ratio)
+plot(reg_data_total_bin_test$var_ratio, reg_data_total_bin_test$var_math2)
 abline(a = 0, b = 1, col = 'red')
 plot(density(reg_data_total_bin_test$erreur_pred2, na.rm = TRUE))
 abline(v = mean(reg_data_total_bin_test$erreur_pred2, na.rm = TRUE), col = 'red')
-reg <- lm(var_ratio ~ 0 + var_pred2, data = reg_data_total_bin_test)
+reg <- lm(var_ratio ~ 0 + var_math2, data = reg_data_total_bin_test)
 summary(reg)
-
-reg <- lm(var_pred ~ 0 + var_pred2, data = reg_data_total_bin_test)
-summary(reg)
-plot(reg_data_total_bin_test$var_pred, reg_data_total_bin_test$var_pred2)
-abline(a = 0, b = 1, col = 'red')
 
 # We compute estimated stds and we compute associated weights for each of our journal-date observations
+# Var math
+reg_data_total_bin = reg_data_total_bin %>% 
+  mutate(empirical_cov_ij = cov_ij_computer(var = var_ratio,
+                                            ess = ess,
+                                            ratio = ratio,
+                                            total = total))
 reg <- lm(empirical_cov_ij ~ 0 + I(1/log(total)) + ratio,
           data = reg_data_total_bin)
 summary(reg)
@@ -211,32 +237,69 @@ b_hat_T = coef(reg)['I(1/log(total))']
 b_hat_R = coef(reg)['ratio']
 temp = gallicagram_data %>% 
   select(total, journal, date, ratio) %>% 
-  mutate(var_pred = custom_var_computer(ratio = ratio,
+  mutate(var_math = custom_var_computer(ratio = ratio,
                                         total = total,
-                                        b_hat_T = b_hat_T_975,
-                                        b_hat_R = b_hat_R_025,
+                                        b_hat_T = b_hat_T,
+                                        b_hat_R = b_hat_R,
                                         ess = ess,
-                                        conf_int = 0.50))
+                                        conf_int = 0.50)) %>% 
+# Var ESS
+  mutate(var_ess = ratio/(total*max(ratio, na.rm = TRUE)))
+plot(temp$var_math, temp$var_ess)
+abline(a = 0, b = 1, col = 'red')
+# Var log log
+reg <- lm(log(var_ratio) ~ log(total) + log(ratio),
+          data = reg_data_total_bin)
+summary(reg)
+temp = temp %>% 
+  mutate(var_loglog = exp(predict(reg, temp)),
+# Var benoit
+         var_benoit = 3.5*ratio/total)
+  
 # To prevent absurd extreme values
-min = quantile(temp$var_pred, 0.05)
-temp$var_pred[temp$var_pred < min] = min
-gallicagram_data$var_pred = NULL
+min = quantile(temp$var_math, 0.05)
+temp$var_math[temp$var_math < min] = min
+gallicagram_data$var_math = NULL
+min = quantile(temp$var_ess, 0.05)
+temp$var_ess[temp$var_ess < min] = min
+gallicagram_data$var_ess = NULL
+min = quantile(temp$var_loglog, 0.05)
+temp$var_loglog[temp$var_loglog < min] = min
+gallicagram_data$var_loglog = NULL
+min = quantile(temp$var_benoit, 0.05)
+temp$var_benoit[temp$var_benoit < min] = min
+gallicagram_data$var_benoit = NULL
 gallicagram_data = gallicagram_data %>% 
-  left_join(temp %>% select(journal, date, var_pred))
-gallicagram_data$weights = 1/sqrt(gallicagram_data$var_pred)
-plot(density(gallicagram_data$weights, na.rm = TRUE))
+  left_join(temp %>% select(journal, date, 
+                            var_math, var_ess, var_loglog, var_benoit)) %>% 
+  mutate(weights_math = 1/sqrt(var_math),
+         weights_ess = 1/sqrt(var_ess),
+         weights_loglog = 1/sqrt(var_loglog),
+         weights_benoit = 1/sqrt(var_benoit),
+         weights_avg = (weights_math + weights_ess + weights_loglog + weights_benoit)/4,
+         weights = 1/sqrt(var_math))
+plot(density(gallicagram_data$weights_math, na.rm = TRUE))
+plot(density(gallicagram_data$weights_ess, na.rm = TRUE))
+plot(density(gallicagram_data$weights_loglog, na.rm = TRUE))
+plot(density(gallicagram_data$weights_benoit, na.rm = TRUE))
+plot(density(gallicagram_data$weights_avg, na.rm = TRUE))
+
+ggplot(gallicagram_data) +
+  geom_density(aes(x = weights_math), fill = "blue", alpha = 0.5) +
+  geom_density(aes(x = weights_ess), fill = "red", alpha = 0.5) +
+  geom_density(aes(x = weights_loglog), fill = "green", alpha = 0.5) +
+  geom_density(aes(x = weights_benoit), fill = "black", alpha = 0.5)
 
 #############################
 ### SEASONALITY COMPUTING ###
 #############################
-
 #### Trend Computing ####
 # Before doing further computations, we need to remove the mean
 # Trend level
 # The variable used to control for the trend level is a moving average centered on date with a width of several years
 # NB : For each trend / seasonality, outliers are removed as the can be considered as unidentified potential events non-related to seasonality 
 
-clean_data = data.frame()
+trend_data = data.frame()
 # !! 1 minute * nb of journal to run this loop
 for (journal in liste_corpus) {
   
@@ -259,12 +322,11 @@ for (journal in liste_corpus) {
   data$ratio_detrend = data$ratio - data$y5_trend
   
   # End of the loop, data storing
-  clean_data = clean_data %>% rbind(data)
+  trend_data = trend_data %>% rbind(data)
 }
 
 #### Seasonality computing ####
 
-gallicagram_data = clean_data
 clean_data = data.frame()
 # !! 1 minute * nb of journal to run this loop
 for (journal in liste_corpus) {
@@ -272,7 +334,7 @@ for (journal in liste_corpus) {
   print(journal) # To keep track
   
   # For loop initialisation
-  data = gallicagram_data[gallicagram_data$journal == journal,]
+  data = trend_data[trend_data$journal == journal,]
   data = data[order(data$date),]
   data = data %>% mutate(date = as.Date(date, format = "%Y-%m-%d"))
   data$ratio_desais = data$ratio_detrend
@@ -311,7 +373,8 @@ for (journal in liste_corpus) {
     moving_average <- rollapply(temp2$ratio_desais, 
                                 width = as.integer(window_size/7), 
                                 align = "center", 
-                                FUN = compute_mean_without_outliers, probs = outliers, 
+                                FUN = compute_mean_without_outliers, 
+                                probs = outliers, 
                                 weights = 'time_lin',
                                 fill = NA)
     temp2$jour_s = moving_average
@@ -322,57 +385,88 @@ for (journal in liste_corpus) {
   data = data %>% 
     mutate(ratio_desais = ratio_desais - jour_s) # We now remove the seasonality from the data
   
-  # Exceptional day of the year seasonality
-  # We measure it as the multiple year average for the same day of the year
-  # data$jour_a = paste(month(data$date), day(data$date), sep = "-")
-  # temp1 = data.frame()
-  # for (day in unique(data$jour_a)) {
-  #   temp2 = data[data$jour_a == day,]
-  #   window_size = 10 + 1
-  #   outliers = 0.1
-  #   moving_average <- rollapply(temp2$ratio_desais,
-  #                               width = window_size,
-  #                               align = "center",
-  #                               FUN = compute_mean_without_outliers, probs = 1 - outliers,
-  #                               weights = 'time_lin',
-  #                               fill = NA)
-  #   temp2$jour_a = moving_average
-  #   temp2 = temp2[c("date", "jour_a")]
-  #   temp1 = temp1 %>% rbind(temp2)
-  # }
-  # data = data %>% select(-jour_a) %>% left_join(temp1, by = "date")
-  # data = data %>% 
-  #   mutate(ratio_desais = ratio_desais - jour_a) # We now remove the seasonality from the data
-  # 
   # End of the loop, data storing
   clean_data = clean_data %>% rbind(data)
 }
 
-#### Computing rollmean ####
+#### Computing rollmean, sd ####
 
+# !! Takes a few minutes
 clean_data = clean_data %>% 
-  mutate(ratio_desais_trend = ratio_desais + y5_trend,
-         ratio_rolled = rollapply(ratio, 
-                                  30,
-                                  compute_mean_without_outliers,
-                                  probs = 1,
-                                  align = 'center', fill = NA, na.pad = TRUE),
-         ratio_desais_trend_rolled = rollapply(ratio_desais_trend, 
-                                              30,
-                                              compute_mean_without_outliers,
-                                              probs = 1,
-                                              align = 'center', fill = NA, na.pad = TRUE))
-       
+  # Ratio with trend deaseasonalised
+  mutate(ratio_desais_trend = ratio_desais + y5_trend) %>% 
+  mutate(ratio_desais_trend_90 = qnorm(0.9, 
+                                      mean = y5_trend, 
+                                      sd = sqrt(var_math)),
+         ratio_desais_trend_10 = qnorm(0.1, 
+                                      mean = y5_trend, 
+                                      sd = sqrt(var_math))) %>% 
+  # Ratio with trend smoothed on 30 days
+  mutate(ratio_rolled_30 = rollapply(ratio, 
+                                     width = 30,
+                                     compute_mean_without_outliers,
+                                     probs = 0.01, weights = 'time_lin',
+                                     align = 'center', fill = NA, na.pad = TRUE),
+         var_pred_rolled_30 = rollapply(var_math, # Intermediate stage to compute rolling variance
+                                        width = 30,
+                                        compute_var_without_outliers,
+                                        probs = 0.01, weights = 'time_lin',
+                                        align = 'center', fill = NA, na.pad = TRUE),
+         ratio_rolled_30_90 = qnorm(0.9, 
+                                    mean = y5_trend, 
+                                    sd = sqrt(var_pred_rolled_30)),
+         ratio_rolled_30_10 = qnorm(0.1, 
+                                  mean = y5_trend, 
+                                  sd = sqrt(var_pred_rolled_30))) %>% 
+  # Ratio with trend deaseasonalised smoothed on 30 days
+  mutate(ratio_desais_trend_rolled_30 = rollapply(ratio_desais_trend, 
+                                                  width = 30,
+                                                  compute_mean_without_outliers,
+                                                  probs = 0.01, weights = 'time_lin',
+                                                  align = 'center', fill = NA, na.pad = TRUE),
+         ratio_desais_trend_rolled_30_90 = qnorm(0.9, 
+                                                 mean = y5_trend, 
+                                                 sd = sqrt(var_pred_rolled_30)),
+         ratio_desais_trend_rolled_30_10 = qnorm(0.1, 
+                                                 mean = y5_trend, 
+                                                 sd = sqrt(var_pred_rolled_30))) %>% 
+  # Ratio with trend deaseasonalised smoothed on 90 days
+  mutate(ratio_desais_trend_rolled_90 = rollapply(ratio_desais_trend, 
+                                                  width = 90,
+                                                  compute_mean_without_outliers,
+                                                  probs = 0.01, weights = 'time_lin',
+                                                  align = 'center', fill = NA, na.pad = TRUE),
+         var_pred_rolled_90 = rollapply(var_math, # Intermediate stage to compute rolling variance
+                                        width = 90,
+                                        compute_var_without_outliers,
+                                        probs = 0.01, weights = 'time_lin',
+                                        align = 'center', fill = NA, na.pad = TRUE),
+         ratio_desais_trend_rolled_90_90 = qnorm(0.9, 
+                                                 mean = y5_trend, 
+                                                 sd = sqrt(var_pred_rolled_90)),
+         ratio_desais_trend_rolled_90_10 = qnorm(0.1, 
+                                                 mean = y5_trend, 
+                                                 sd = sqrt(var_pred_rolled_90)))
+
+# Saving data since all this was computationally intense 🥵
+write.csv(clean_data, 
+          paste0(path_projet, "\\clean_data.csv"), 
+          fileEncoding = 'UTF-8', row.names = FALSE)
+
 #### Visualization ####
+
+clean_data = read.csv(paste0(path_projet, "\\clean_data.csv"), encoding = 'UTF-8')
+clean_data = clean_data %>% mutate(date = as.Date(date, format = "%Y-%m-%d"))
 
 # Let's plot this new data
 plot_list = list()
 for (journal in "figaro") {
-  BOOL = (clean_data$journal == journal) & (year(clean_data$date) > 1885) & (year(clean_data$date) < 1890)
+  BOOL = (clean_data$journal == journal) & (year(clean_data$date) > 1880) & (year(clean_data$date) < 1883)
   data = clean_data[BOOL,]
   new_plot = ggplot(data, aes(x = date)) +
-    geom_line(aes(y = jour_s), col = 'blue') +
-    geom_line(aes(y = ratio_desais_trend), col = 'red')
+    geom_line(aes(y = ratio_desais_trend_rolled_30), col = 'blue') +
+    geom_line(aes(y = ratio_desais_trend_rolled_30_90), col = 'red') +
+    geom_line(aes(y = ratio_desais_trend_rolled_30_10), col = 'red')
   new_plot = new_plot +
     labs(title = journal) +
     labs(x = NULL, y = NULL) +
@@ -383,6 +477,12 @@ for (journal in "figaro") {
   plot_list = c(plot_list, list(new_plot))
 }
 grid.arrange(grobs = plot_list, ncol = 1)
+
+plot_ly(clean_data,
+        x=~date,
+        y=~ratio_desais_trend,
+        mode="lines")
+
 
 #############################
 ### EVENT REGRESSION TEST ###
@@ -410,8 +510,12 @@ reg_data$guerre70[BOOL] = 1
 reg_data$WWI = 0 
 BOOL = (as.Date("1914-07-28", format = "%Y-%m-%d") <= reg_data$date) & (reg_data$date <= as.Date("1918-11-11", format = "%Y-%m-%d"))
 reg_data$WWI[BOOL] = 1
+# 14 July
+reg_data$July14 = 0 
+BOOL = (month(reg_data$date) == 7) & (day(reg_data$date) == 14)
+reg_data$July14[BOOL] = 1
 
-# Event proxies
+#### Event proxies ####
 # Some of the events do not have strict timelines and occur with varying intensity
 # To take this into account, we create variables that measure this intensity
 # The ratio_ variables define the mean occurence of certain words inside the journal_list corpus
@@ -697,14 +801,14 @@ for (date in dems) {
 reg_data2 = reg_data %>% 
   select(date, journal,
          ratio_desais_trend, y5_trend, weights,
-         Regime, guerre70, WWI,
+         Regime, guerre70, WWI, July14,
          ratio_dreyfus, ratio_panama, ratio_greve, ratio_cholera, ratio_guerre, 
          ratio_exposition, ratio_election, ratio_assemblee,
          gdp_growth, demission) %>% 
   mutate(across(!date & !journal & !Regime, as.numeric)) %>% 
   na.omit()
-reg = lm(ratio_desais_trend ~ journal +
-           Regime + guerre70 + WWI +
+reg = lm(ratio_desais_trend ~ journal + I(as.numeric(date)) +
+           Regime + guerre70 + WWI + July14 +
            ratio_dreyfus + ratio_panama + ratio_greve + ratio_cholera + ratio_exposition + ratio_assemblee +
            gdp_growth + demission,
          data = reg_data2,
@@ -712,13 +816,14 @@ reg = lm(ratio_desais_trend ~ journal +
 summary(reg)
 qqnorm(reg$residuals)
 qqline(reg$residuals, col = "red", lty = 2)
+plot(reg_data2$date, residuals(reg))
 
 # This regression does not take into account the newspapers (may) behave differently : each event (may) has a different effect on each newspaper
 # We repeat the regression by interacting each newspaper with each of the events
 reg_data2 = reg_data %>% 
   select(date, journal, weights,
          ratio_desais_trend, y5_trend,
-         guerre70, Regime, WWI,
+         guerre70, Regime, WWI, July14,
          ratio_dreyfus, ratio_panama, ratio_greve, ratio_cholera, ratio_guerre, ratio_exposition, ratio_election, ratio_assemblee,
          gdp_growth, demission) %>% 
   mutate(across(!date & !journal &!Regime, as.numeric)) %>% 
