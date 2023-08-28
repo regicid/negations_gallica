@@ -16,7 +16,7 @@ library(zoo)
 library(plotly)
 
 # Custom path
-path_projet = "C:\\Users\\Dell\\Documents\\Projet Benoit\\data"
+path_projet = "~/code/negations_gallica/"
 # Analysis parameters
 time_frame = c("1850", "1920")
 liste_corpus = c("huma",
@@ -27,7 +27,7 @@ liste_corpus = c("huma",
                  "journal_des_debats",
                  "la_presse",
                  "petit_parisien")
-scrap_data = FALSE # If the data are already downloaded on your machine set to FALSE
+scrap_data = T # If the data are already downloaded on your machine set to FALSE
 
 # Custom functions
 # API retreiving function call
@@ -490,8 +490,8 @@ plot_ly(clean_data,
 
 # Analysing wether events have an influence on time series
 # We will be more precise than in the the above graphic section as we will not resort on smoothing out the data
-
-reg_data = clean_data
+for (liste_corpus in c("temps","figaro","journal_des_debats","petit_journal","petit_parisien")){
+reg_data = filter(clean_data,journal==liste_corpus)
 
 #### Event Creation ####
 # We create the events we want to test
@@ -557,7 +557,12 @@ if (scrap_data) {
   df_panama = 0
   for (corpus in liste_corpus) {
     print(corpus)
-    df = data_call(mot = 'panama', debut = time_frame[1], fin = time_frame[2], resolution = "jour", corpus = corpus)
+    df = data_call(mot = 'procès', debut = time_frame[1], fin = time_frame[2], resolution = "jour", corpus = corpus)
+    df2 = data_call(mot = 'avocat', debut = time_frame[1], fin = time_frame[2], resolution = "jour", corpus = corpus)
+    df3 = data_call(mot = "l'avocat", debut = time_frame[1], fin = time_frame[2], resolution = "jour", corpus = corpus)
+    df4 = data_call(mot = 'audience', debut = time_frame[1], fin = time_frame[2], resolution = "jour", corpus = corpus)
+    df5 = data_call(mot = "l'audience", debut = time_frame[1], fin = time_frame[2], resolution = "jour", corpus = corpus)
+    df$n = df$n + df2$n + df3$n + df4$n + df5$n
     df$journal = corpus
     if (length(df_panama) == 1) {
       df_panama = df
@@ -571,8 +576,8 @@ if (scrap_data) {
     group_by(date) %>% 
     summarise(ratio_panama = mean(ratio_panama, na.rm = TRUE)) %>% ungroup()
   df_panama$ratio_panama = rollmean(df_panama$ratio_panama, 30, align = "center", na.rm = TRUE, na.pad = TRUE)
-  BOOL = (as.Date("1889-02-01", format = "%Y-%m-%d") <= df_panama$date) & (df_panama$date <= as.Date("1898-05-30", format = "%Y-%m-%d"))
-  df_panama$ratio_panama[!BOOL] = 0
+  #BOOL = (as.Date("1889-02-01", format = "%Y-%m-%d") <= df_panama$date) & (df_panama$date <= as.Date("1898-05-30", format = "%Y-%m-%d"))
+  #df_panama$ratio_panama[!BOOL] = 0
   
   write.csv(df_panama, 
             paste0(path_projet, "\\df_panama.csv"), 
@@ -772,7 +777,7 @@ reg_data = reg_data %>% left_join(df_assemblee %>% select(date, ratio_assemblee)
 
 ### French economic growth ###
 # Retrieved on https://mail.google.com/mail/u/0/?tab=rm&ogbl#search/eurostar/FMfcgzGtwWHnmzLdXtwbxbGJnWlkKkMQ
-data_eco = read.csv(paste0(path_projet, "\\data croissance.csv"))
+data_eco = read.csv(paste0(path_projet, "data croissance.csv"))
 data_eco = data_eco %>% 
   mutate(gdppc = as.numeric(gdppc),
          pop= as.numeric(pop)) %>% 
@@ -784,7 +789,7 @@ reg_data$year = year(reg_data$date)
 reg_data = reg_data %>% left_join(data_eco %>% select(year, gdp_growth))
 
 ### President of council resignation ###
-data_dem = read.csv(paste0(path_projet, "\\dates_pdc.csv"))
+data_dem = read.csv(paste0(path_projet, "dates_pdc.csv"))
 data_dem = data_dem %>%  
   mutate(date_demission = as.Date(date_demission, format = "%Y-%m-%d"))
 reg_data$demission = FALSE
@@ -798,22 +803,26 @@ for (date in dems) {
 #### Regressions ####
 # We make a regression with the identified events to test their significance
 
-reg_data2 = reg_data %>% 
-  select(date, journal,
-         ratio_desais_trend, y5_trend, weights,
+reg_data2 = reg_data %>% filter(journal==corpus) %>%
+  select(date, journal,mois,annee,
+         ratio, ratio_desais_trend, y5_trend, weights,gdp_growth,demission,
          Regime, guerre70, WWI, July14,
          ratio_dreyfus, ratio_panama, ratio_greve, ratio_cholera, ratio_guerre, 
-         ratio_exposition, ratio_election, ratio_assemblee,
-         gdp_growth, demission) %>% 
+         ratio_exposition, ratio_election, ratio_assemblee) %>% 
   mutate(across(!date & !journal & !Regime, as.numeric)) %>% 
   na.omit()
-reg = lm(ratio_desais_trend ~ journal + I(as.numeric(date)) +
-           Regime + guerre70 + WWI + July14 +
-           ratio_dreyfus + ratio_panama + ratio_greve + ratio_cholera + ratio_exposition + ratio_assemblee +
-           gdp_growth + demission,
-         data = reg_data2,
-         weights = weights)
-summary(reg)
+
+reg_data2[c(3,15:22)] = scale(reg_data2[c(3,15:22)])
+reg = lm(ratio ~ I(as.numeric(date)) +
+            WWI + July14  + gdp_growth + demission +
+           ratio_dreyfus + ratio_greve + ratio_cholera + ratio_exposition + ratio_assemblee*Regime,
+         data = reg_data2,weights = weights)
+print(summary(reg))
+print(corpus)
+}
+reg_data2$residuals = reg$residuals
+plot_ly(reg_data2,x=~date,y=~residuals,mode="lines")
+
 qqnorm(reg$residuals)
 qqline(reg$residuals, col = "red", lty = 2)
 plot(reg_data2$date, residuals(reg))
